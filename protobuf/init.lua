@@ -35,11 +35,11 @@ local encoder = require "protobuf.encoder"
 local decoder = require "protobuf.decoder"
 local listener_mod = require "protobuf.listener"
 local containers = require "protobuf.containers"
-local descriptor = require "protobuf.descriptor"
-local FieldDescriptor = descriptor.FieldDescriptor
+local pb_descriptor = require "protobuf.descriptor"
+local FieldDescriptor = pb_descriptor.FieldDescriptor
 local text_format = require "protobuf.text_format"
 
-module "protobuf"
+local protobuf = {}
 
 local function make_descriptor(name, descriptor, usable_key)
   local meta = {
@@ -56,7 +56,7 @@ local function make_descriptor(name, descriptor, usable_key)
     return setmetatable({}, meta)
   end
 
-  _M[name] = setmetatable(descriptor, meta);
+  protobuf[name] = setmetatable(descriptor, meta);
 end
 
 make_descriptor("Descriptor", {}, {
@@ -231,27 +231,6 @@ local TYPE_TO_DECODER = {
   [FieldDescriptor.TYPE_SINT64] = decoder.SInt64Decoder
 }
 
-local FIELD_TYPE_TO_WIRE_TYPE = {
-  [FieldDescriptor.TYPE_DOUBLE] = wire_format.WIRETYPE_FIXED64,
-  [FieldDescriptor.TYPE_FLOAT] = wire_format.WIRETYPE_FIXED32,
-  [FieldDescriptor.TYPE_INT64] = wire_format.WIRETYPE_VARINT,
-  [FieldDescriptor.TYPE_UINT64] = wire_format.WIRETYPE_VARINT,
-  [FieldDescriptor.TYPE_INT32] = wire_format.WIRETYPE_VARINT,
-  [FieldDescriptor.TYPE_FIXED64] = wire_format.WIRETYPE_FIXED64,
-  [FieldDescriptor.TYPE_FIXED32] = wire_format.WIRETYPE_FIXED32,
-  [FieldDescriptor.TYPE_BOOL] = wire_format.WIRETYPE_VARINT,
-  [FieldDescriptor.TYPE_STRING] = wire_format.WIRETYPE_LENGTH_DELIMITED,
-  [FieldDescriptor.TYPE_GROUP] = wire_format.WIRETYPE_START_GROUP,
-  [FieldDescriptor.TYPE_MESSAGE] = wire_format.WIRETYPE_LENGTH_DELIMITED,
-  [FieldDescriptor.TYPE_BYTES] = wire_format.WIRETYPE_LENGTH_DELIMITED,
-  [FieldDescriptor.TYPE_UINT32] = wire_format.WIRETYPE_VARINT,
-  [FieldDescriptor.TYPE_ENUM] = wire_format.WIRETYPE_VARINT,
-  [FieldDescriptor.TYPE_SFIXED32] = wire_format.WIRETYPE_FIXED32,
-  [FieldDescriptor.TYPE_SFIXED64] = wire_format.WIRETYPE_FIXED64,
-  [FieldDescriptor.TYPE_SINT32] = wire_format.WIRETYPE_VARINT,
-  [FieldDescriptor.TYPE_SINT64] = wire_format.WIRETYPE_VARINT
-}
-
 local function IsTypePackable(field_type)
   return NON_PACKABLE_TYPES[field_type] == nil
 end
@@ -283,7 +262,7 @@ local function _DefaultValueConstructorForField(field)
   if field.cpp_type == FieldDescriptor.CPPTYPE_MESSAGE then
     local message_type = field.message_type
     return function (message)
-      result = message_type._concrete_class()
+      local result = message_type._concrete_class()
       result._SetListener(message._listener_for_children)
       return result
     end
@@ -297,18 +276,25 @@ local function _AttachFieldHelpers(message_meta, field_descriptor)
   local is_repeated = (field_descriptor.label == FieldDescriptor.LABEL_REPEATED)
   local is_packed = (field_descriptor.has_options and field_descriptor.GetOptions().packed)
 
-  rawset(field_descriptor, "_encoder", TYPE_TO_ENCODER[field_descriptor.type](field_descriptor.number, is_repeated, is_packed))
-  rawset(field_descriptor, "_sizer", TYPE_TO_SIZER[field_descriptor.type](field_descriptor.number, is_repeated, is_packed))
+  rawset(field_descriptor, "_encoder",
+    TYPE_TO_ENCODER[field_descriptor.type](field_descriptor.number, is_repeated, is_packed))
+  rawset(field_descriptor, "_sizer",
+    TYPE_TO_SIZER[field_descriptor.type](field_descriptor.number, is_repeated, is_packed))
   rawset(field_descriptor, "_default_constructor", _DefaultValueConstructorForField(field_descriptor))
 
-  local AddDecoder = function(wiretype, is_packed)
+  local AddDecoder = function(wiretype, _is_packed)
     local tag_bytes = encoder.TagBytes(field_descriptor.number, wiretype)
-    message_meta._decoders_by_tag[tag_bytes] = TYPE_TO_DECODER[field_descriptor.type](field_descriptor.number, is_repeated, is_packed, field_descriptor, field_descriptor._default_constructor)
+    message_meta._decoders_by_tag[tag_bytes] =
+    TYPE_TO_DECODER[field_descriptor.type](field_descriptor.number,
+                                           is_repeated,
+                                           _is_packed,
+                                           field_descriptor,
+                                           field_descriptor._default_constructor)
   end
 
-  AddDecoder(FIELD_TYPE_TO_WIRE_TYPE[field_descriptor.type], False)
+  AddDecoder(FIELD_TYPE_TO_WIRE_TYPE[field_descriptor.type], false)
   if is_repeated and IsTypePackable(field_descriptor.type) then
-    AddDecoder(wire_format.WIRETYPE_LENGTH_DELIMITED, True)
+    AddDecoder(wire_format.WIRETYPE_LENGTH_DELIMITED, true)
   end
 end
 
@@ -391,7 +377,7 @@ local function _AddPropertiesForNonRepeatedScalarField(field, message)
 end
 
 local function _AddPropertiesForField(field, message_meta)
-  constant_name = field.name:upper() .. "_FIELD_NUMBER"
+  local constant_name = field.name:upper() .. "_FIELD_NUMBER"
   message_meta._member[constant_name] = field.number
 
   if field.label == FieldDescriptor.LABEL_REPEATED then
@@ -426,7 +412,8 @@ local _ED_meta = {
     local _extended_message = rawget(self, "_extended_message")
     if (extension_handle.label == FieldDescriptor.LABEL_REPEATED or
         extension_handle.cpp_type == FieldDescriptor.CPPTYPE_MESSAGE) then
-      error('Cannot assign to extension "'.. extension_handle.full_name .. '" because it is a repeated or composite type.')
+      error('Cannot assign to extension "'.. extension_handle.full_name ..
+            '" because it is a repeated or composite type.')
     end
     local type_checker = GetTypeChecker(extension_handle.cpp_type, extension_handle.type)
     type_checker.CheckValue(value)
@@ -493,18 +480,18 @@ end
 local function _AddListFieldsMethod(message_descriptor, message_meta)
   message_meta._member.ListFields = function (self)
     local list_field = function(fields)
-      local f, s, v = pairs(self._fields)
-      local iter = function(a, i)
+      local s, v
+      local iter = function()
         while true do
-          local descriptor, value = f(a, i)
-          if descriptor == nil then
+          s, v = next(fields, s)
+          if s == nil then
             return
-          elseif _IsPresent(descriptor, value) then
-            return descriptor, value
+          elseif _IsPresent(s, v) then
+            return s, v
           end
         end
       end
-      return iter, s, v
+      return iter
     end
     return list_field(self._fields)
   end
@@ -518,12 +505,12 @@ local function _AddHasFieldMethod(message_descriptor, message_meta)
     end
   end
   message_meta._member.HasField = function (self, field_name)
-    field = singular_fields[field_name]
+    local field = singular_fields[field_name]
     if field == nil then
       error('Protocol message has no singular "'.. field_name.. '" field.')
     end
     if field.cpp_type == FieldDescriptor.CPPTYPE_MESSAGE then
-      value = self._fields[field]
+      local value = self._fields[field]
       return value ~= nil  and value._is_present_in_parent
     else
       return self._fields[field]
@@ -573,7 +560,7 @@ local function _AddHasExtensionMethod(message_meta)
       error(extension_handle.full_name .. ' is repeated.')
     end
     if extension_handle.cpp_type == FieldDescriptor.CPPTYPE_MESSAGE then
-      value = self._fields[extension_handle]
+      local value = self._fields[extension_handle]
       return value ~= nil and value._is_present_in_parent
     else
       return self._fields[extension_handle]
@@ -749,6 +736,7 @@ local function _AddIsInitializedMethod(message_descriptor, message_meta)
 
     for field, value in message_meta._member.ListFields(self) do
       if field.cpp_type == FieldDescriptor.CPPTYPE_MESSAGE then
+        local name
         if field.is_extension then
           name = string.format("(%s)", field.full_name)
         else
@@ -756,15 +744,15 @@ local function _AddIsInitializedMethod(message_descriptor, message_meta)
         end
         if field.label == FieldDescriptor.LABEL_REPEATED then
           for i, element in ipairs(value) do
-            prefix = string.format("%s[%d].", name, i)
-            sub_errors = element:FindInitializationErrors()
+            local prefix = string.format("%s[%d].", name, i)
+            local sub_errors = element:FindInitializationErrors()
             for _, e in ipairs(sub_errors) do
               errors[#errors + 1] = prefix .. e
             end
           end
         else
-          prefix = name .. "."
-          sub_errors = value:FindInitializationErrors()
+          local prefix = name .. "."
+          local sub_errors = value:FindInitializationErrors()
           for _, e in ipairs(sub_errors) do
             errors[#errors + 1] = prefix .. e
           end
@@ -784,6 +772,7 @@ local function _AddMergeFromMethod(message_meta)
     message_meta._member._Modified(self)
 
     local fields = self._fields
+    local field_value
 
     for field, value in pairs(msg._fields) do
       if field.label == LABEL_REPEATED or field.cpp_type == CPPTYPE_MESSAGE then
@@ -860,7 +849,7 @@ local function property_setter(message_meta)
 	end
 end
 
-function _AddClassAttributesForNestedExtensions(descriptor, message_meta)
+local function _AddClassAttributesForNestedExtensions(descriptor, message_meta)
   local extension_dict = descriptor._extensions_by_name
   for extension_name, extension_field in pairs(extension_dict) do
     message_meta._member[extension_name] = extension_field
@@ -894,7 +883,7 @@ local function Message(descriptor)
 
   if rawget(descriptor, "_concrete_class") == nil then
     rawset(descriptor, "_concrete_class", ns)
-    for k, field in ipairs(descriptor.fields) do
+    for _, field in ipairs(descriptor.fields) do
       _AttachFieldHelpers(message_meta, field)
     end
   end
@@ -912,4 +901,6 @@ local function Message(descriptor)
   return ns
 end
 
-_M.Message = Message
+protobuf.Message = Message
+
+return protobuf
